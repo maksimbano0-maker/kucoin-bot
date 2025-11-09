@@ -1,40 +1,41 @@
+import os
 import requests
-import time
 import csv
 import io
 import schedule
-import threading
 import json
-import os
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# === ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не спал) ===
 from aiohttp import web
-
-async def health_check(request):
-    return web.Response(text="KuCoin Bot is ALIVE!")
-
-def run_web_server():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    web.run_app(app, host='0.0.0.0', port=8080)
+import asyncio
 
 # === НАСТРОЙКИ ===
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-    print("ОШИБКА: Установите переменную TELEGRAM_TOKEN!")
+    print("ОШИБКА: TELEGRAM_TOKEN не задан!")
     exit(1)
 
 CHAT_IDS = ["969434824"]
 GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1M3nf9qp9uDCIkIOR_Qp1-gU5qemZd7NYX3vorhOZcKc/export?format=csv"
 LOG_FILE = "prices.log"
 
+# === ВЕБ-СЕРВЕР (для Render) ===
+async def health_check(request):
+    return web.Response(text="KuCoin Bot is ALIVE!")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("Веб-сервер запущен на порту 8080")
+
 # === ЛОГИРОВАНИЕ ===
 def log_growth(symbol, days, price, is_break=False):
-    if days < 5 and not is_break:
-        return
+    if days < 5 and not is_break: return
     entry = {
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
@@ -54,26 +55,22 @@ def clear_old_logs():
             for line in f:
                 try:
                     data = json.loads(line)
-                    log_time = datetime.strptime(data["time"], "%Y-%m-%d %H:%M:%S").timestamp()
-                    if log_time > cutoff:
+                    if datetime.strptime(data["time"], "%Y-%m-%d %H:%M:%S").timestamp() > cutoff:
                         lines.append(line)
-                except:
-                    continue
+                except: continue
         with open(LOG_FILE, "w", encoding="utf-8") as f:
             f.writelines(lines)
-    except:
-        pass
+    except: pass
 
 # === API ===
 def get_symbols_from_sheet():
     try:
-        response = requests.get(GOOGLE_SHEET_CSV_URL, timeout=10)
-        response.raise_for_status()
-        data = csv.reader(io.StringIO(response.text))
-        symbols = [row[0].strip().upper() for row in data if row]
-        return [s for s in symbols if s and not s.lower().startswith("symbol")]
+        r = requests.get(GOOGLE_SHEET_CSV_URL, timeout=10)
+        r.raise_for_status()
+        data = csv.reader(io.StringIO(r.text))
+        return [row[0].strip().upper() for row in data if row and not row[0].lower().startswith("symbol")]
     except Exception as e:
-        print(f"Ошибка таблицы: {e}")
+        print(f"Таблица: {e}")
         return []
 
 def get_futures_candles(base_symbol, days=10):
@@ -81,29 +78,23 @@ def get_futures_candles(base_symbol, days=10):
     url = f"https://api-futures.kucoin.com/api/v1/kline/query?symbol={symbol}&granularity=1440"
     try:
         r = requests.get(url, timeout=10).json()
-        if r.get('code') != '200000' or not r.get('data'):
-            return []
-        candles = sorted(r['data'], key=lambda x: int(x[0]))
-        return candles[-days:]
+        if r.get('code') != '200000' or not r.get('data'): return []
+        return sorted(r['data'], key=lambda x: int(x[0]))[-days:]
     except Exception as e:
-        print(f"API ошибка {symbol}: {e}")
+        print(f"API {symbol}: {e}")
         return []
 
 # === АНАЛИЗ ===
 def analyze_growth(symbol):
     candles = get_futures_candles(symbol, 10)
-    if len(candles) < 2:
-        return 0, None, None, False
+    if len(candles) < 2: return 0, None, None, False
     closes = [float(c[2]) for c in candles]
-    current = closes[-1]
-    prev = closes[-2]
+    current, prev = closes[-1], closes[-2]
     growth_days = 0
     for i in range(len(closes)-1, 0, -1):
-        if closes[i] > closes[i-1]:
-            growth_days += 1
-        else:
-            break
-    is_break = (growth_days >= 6) and (current < prev)
+        if closes[i] > closes[i-1]: growth_days += 1
+        else: break
+    is_break = growth_days >= 6 and current < prev
     return growth_days, current, prev, is_break
 
 # === ПРОВЕРКИ ===
@@ -111,98 +102,90 @@ def check_morning():
     print(f"\n[{datetime.now()}] УТРО: логируем ≥5 дней")
     for symbol in get_symbols_from_sheet():
         try:
-            growth_days, price, _, _ = analyze_growth(symbol)
+            g, p, _, _ = analyze_growth(symbol)
             base = symbol.replace("USDTM", "")
-            if growth_days >= 5:
-                log_growth(base, growth_days, price)
-        except Exception as e:
-            print(f"Ошибка {symbol}: {e}")
+            if g >= 5: log_growth(base, g, p)
+        except Exception as e: print(f"Ошибка {symbol}: {e}")
     clear_old_logs()
 
 def check_evening():
     print(f"\n[{datetime.now()}] ВЕЧЕР: АЛЕРТЫ с 5-го дня!")
+    app = Application.builder().token(TOKEN).build()
     for symbol in get_symbols_from_sheet():
         try:
-            growth_days, price, prev_price, is_break = analyze_growth(symbol)
+            g, p, _, ib = analyze_growth(symbol)
             base = symbol.replace("USDTM", "")
-            if is_break:
-                msg = f"ПАДЕНИЕ {base}: после {growth_days} дней роста! Цена: ${price:.2f}"
-                for chat_id in CHAT_IDS:
-                    Application.builder().token(TOKEN).build().bot.send_message(chat_id=chat_id, text=msg)
-                log_growth(base, growth_days, price, is_break=True)
-            elif growth_days >= 8:
-                msg = f"СИЛЬНЫЙ РОСТ {base}: {growth_days} дней подряд! Цена: ${price:.2f}"
-                for chat_id in CHAT_IDS:
-                    Application.builder().token(TOKEN).build().bot.send_message(chat_id=chat_id, text=msg)
-                log_growth(base, growth_days, price)
-            elif growth_days >= 5:
-                msg = f"РОСТ {base}: {growth_days} дней подряд! Цена: ${price:.2f}"
-                for chat_id in CHAT_IDS:
-                    Application.builder().token(TOKEN).build().bot.send_message(chat_id=chat_id, text=msg)
-                log_growth(base, growth_days, price)
-        except Exception as e:
-            print(f"Ошибка {symbol}: {e}")
+            if ib:
+                msg = f"ПАДЕНИЕ {base}: после {g} дней! Цена: ${p:.2f}"
+                for cid in CHAT_IDS:
+                    asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
+                log_growth(base, g, p, True)
+            elif g >= 8:
+                msg = f"СИЛЬНЫЙ РОСТ {base}: {g} дней! Цена: ${p:.2f}"
+                for cid in CHAT_IDS:
+                    asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
+                log_growth(base, g, p)
+            elif g >= 5:
+                msg = f"РОСТ {base}: {g} дней! Цена: ${p:.2f}"
+                for cid in CHAT_IDS:
+                    asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
+                log_growth(base, g, p)
+        except Exception as e: print(f"Ошибка {symbol}: {e}")
     clear_old_logs()
-
-# === ИНТЕРАКТИВ ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "KuCoin Futures Pro Bot\n\n"
-        "• 9:00 — логируем рост ≥5 дней\n"
-        "• 21:00 — АЛЕРТЫ с 5-го дня!\n"
-        "• Рост: 5, 6, 7, 8+ дней\n"
-        "• Падение после 6+ дней\n\n"
-        "Отправь: `ETH`, `XBT 3`"
-    )
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().upper()
-    parts = text.split()
-    base_symbol = parts[0]
-    days = min(int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5, 30)
-
-    await update.message.reply_chat_action("typing")
-    candles = get_futures_candles(base_symbol, days + 1)
-    if not candles:
-        await update.message.reply_text(f"Нет данных: {base_symbol}")
-        return
-
-    closes = [float(c[2]) for c in candles]
-    current = closes[-1]
-    start = closes[0]
-    growth = ((current - start) / start) * 100
-
-    days_word = "день" if days == 1 else "дня" if days <= 4 else "дней"
-    emoji = "UP" if growth > 0 else "DOWN" if growth < 0 else "FLAT"
-    price_fmt = f"${current:.2f}" if current >= 10 else f"${current:.6f}"
-
-    message = (
-        f"<b>{base_symbol}/USDT</b>\n"
-        f"Цена: <code>{price_fmt}</code>\n"
-        f"{emoji} Рост за {days} {days_word}: <b>{growth:+.2f}%</b>"
-    )
-    await update.message.reply_text(message, parse_mode='HTML')
 
 # === ПЛАНИРОВЩИК ===
 def run_scheduler():
     schedule.every().day.at("09:00").do(check_morning)
     schedule.every().day.at("21:00").do(check_evening)
-    print("Планировщик: 9:00 (лог) | 21:00 (алерты)")
+    print("Планировщик: 9:00 | 21:00")
     while True:
         schedule.run_pending()
         time.sleep(60)
 
-# === ЗАПУСК ===
-if __name__ == "__main__":
+# === ИНТЕРАКТИВ ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "KuCoin Pro Bot\n\n"
+        "• 9:00 — лог ≥5 дней\n"
+        "• 21:00 — АЛЕРТЫ с 5-го дня!\n"
+        "• Рост: 5,6,7,8+ дней\n"
+        "• Падение после 6+ дней\n\n"
+        "Пиши: `ETH`, `XBT 3`"
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().upper().split()
+    symbol = text[0]
+    days = min(int(text[1]) if len(text) > 1 and text[1].isdigit() else 5, 30)
+    candles = get_futures_candles(symbol, days + 1)
+    if not candles:
+        await update.message.reply_text(f"Нет данных: {symbol}")
+        return
+    closes = [float(c[2]) for c in candles]
+    current, start = closes[-1], closes[0]
+    growth = (current - start) / start * 100
+    days_word = ["день", "дня", "дня", "дня", "дней"][min(days, 4)]
+    emoji = "UP" if growth > 0 else "DOWN" if growth < 0 else "FLAT"
+    price_fmt = f"${current:.2f}" if current >= 10 else f"${current:.6f}"
+    await update.message.reply_text(
+        f"<b>{symbol}/USDT</b>\n"
+        f"Цена: <code>{price_fmt}</code>\n"
+        f"{emoji} За {days} {days_word}: <b>{growth:+.2f}%</b>",
+        parse_mode='HTML'
+    )
+
+# === ОСНОВНОЙ ЦИКЛ ===
+async def main():
     print("KuCoin Pro Bot запущен!")
 
     open(LOG_FILE, "a").close()
 
     # Планировщик
+    import threading
     threading.Thread(target=run_scheduler, daemon=True).start()
 
-    # Веб-сервер (для Render)
-    threading.Thread(target=run_web_server, daemon=True).start()
+    # Веб-сервер
+    await run_web_server()
 
     # Бот
     app = Application.builder().token(TOKEN).build()
@@ -210,4 +193,7 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Готов! Проверки: 9:00 и 21:00")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
