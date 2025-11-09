@@ -4,6 +4,8 @@ import csv
 import io
 import schedule
 import json
+import time  # ← ДОБАВЛЕНО!
+import threading
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -20,7 +22,7 @@ CHAT_IDS = ["969434824"]
 GOOGLE_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1M3nf9qp9uDCIkIOR_Qp1-gU5qemZd7NYX3vorhOZcKc/export?format=csv"
 LOG_FILE = "prices.log"
 
-# === ВЕБ-СЕРВЕР (для Render) ===
+# === ВЕБ-СЕРВЕР ===
 async def health_check(request):
     return web.Response(text="KuCoin Bot is ALIVE!")
 
@@ -31,9 +33,9 @@ async def run_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
-    print("Веб-сервер запущен на порту 8080")
+    print("Веб-сервер: порт 8080")
 
-# === ЛОГИРОВАНИЕ ===
+# === ЛОГИ ===
 def log_growth(symbol, days, price, is_break=False):
     if days < 5 and not is_break: return
     entry = {
@@ -45,17 +47,18 @@ def log_growth(symbol, days, price, is_break=False):
     }
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    print(f"ЛОГ: {symbol} — {days} дней → {'падение' if is_break else 'рост'}")
+    print(f"ЛОГ: {symbol} — {days} дней")
 
 def clear_old_logs():
     try:
-        cutoff = (datetime.now() - timedelta(days=30)).timestamp()
+        cutoff = datetime.now() - timedelta(days=30)
         lines = []
         with open(LOG_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 try:
                     data = json.loads(line)
-                    if datetime.strptime(data["time"], "%Y-%m-%d %H:%M:%S").timestamp() > cutoff:
+                    log_time = datetime.strptime(data["time"], "%Y-%m-%d %H:%M:%S")
+                    if log_time > cutoff:
                         lines.append(line)
                 except: continue
         with open(LOG_FILE, "w", encoding="utf-8") as f:
@@ -115,21 +118,17 @@ def check_evening():
         try:
             g, p, _, ib = analyze_growth(symbol)
             base = symbol.replace("USDTM", "")
+            msg = ""
             if ib:
                 msg = f"ПАДЕНИЕ {base}: после {g} дней! Цена: ${p:.2f}"
-                for cid in CHAT_IDS:
-                    asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
-                log_growth(base, g, p, True)
             elif g >= 8:
                 msg = f"СИЛЬНЫЙ РОСТ {base}: {g} дней! Цена: ${p:.2f}"
-                for cid in CHAT_IDS:
-                    asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
-                log_growth(base, g, p)
             elif g >= 5:
                 msg = f"РОСТ {base}: {g} дней! Цена: ${p:.2f}"
+            if msg:
                 for cid in CHAT_IDS:
                     asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
-                log_growth(base, g, p)
+                log_growth(base, g, p, ib)
         except Exception as e: print(f"Ошибка {symbol}: {e}")
     clear_old_logs()
 
@@ -140,7 +139,7 @@ def run_scheduler():
     print("Планировщик: 9:00 | 21:00")
     while True:
         schedule.run_pending()
-        time.sleep(60)
+        time.sleep(60)  # ← time импортирован!
 
 # === ИНТЕРАКТИВ ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,7 +180,6 @@ async def main():
     open(LOG_FILE, "a").close()
 
     # Планировщик
-    import threading
     threading.Thread(target=run_scheduler, daemon=True).start()
 
     # Веб-сервер
