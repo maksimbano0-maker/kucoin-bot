@@ -2,7 +2,6 @@ services:
   - type: web
     name: kucoin-bot
     env: python
-    pythonVersion: "3.11"  # ← КРИТИЧНО!
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
