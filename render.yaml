@@ -2,9 +2,10 @@ services:
   - type: web
     name: kucoin-bot
     env: python
+    pythonVersion: "3.11"  # ← ВАЖНО!
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python coinbot.py
+    startCommand: python main.py
     autoDeploy: true
     envVars:
       TELEGRAM_TOKEN:
