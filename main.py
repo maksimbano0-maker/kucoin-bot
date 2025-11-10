@@ -99,7 +99,8 @@ def check_morning():
             log_growth(s.replace("USDTM", ""), g, p)
     clear_old_logs()
 
-def check_evening():
+
+async def send_evening_alerts():
     print(f"\n[{datetime.now()}] Вечер: алерты с 5-го дня!")
     app = Application.builder().token(TOKEN).build()
     for s in get_symbols_from_sheet():
@@ -114,14 +115,14 @@ def check_evening():
             msg = f"РОСТ {base}: {g} дней! Цена: ${p:.2f}"
         if msg:
             for cid in CHAT_IDS:
-                asyncio.run(app.bot.send_message(chat_id=cid, text=msg))
+                await app.bot.send_message(chat_id=cid, text=msg)
             log_growth(base, g, p, ib)
     clear_old_logs()
 
 # === ПЛАНИРОВЩИК ===
 def run_scheduler():
     schedule.every().day.at("09:00").do(check_morning)
-    schedule.every().day.at("21:00").do(check_evening)
+    schedule.every().day.at("21:00").do(lambda: asyncio.run(send_evening_alerts()))
     print("Планировщик запущен")
     while True:
         schedule.run_pending()
@@ -171,3 +172,4 @@ async def main():
 # === ЗАПУСК ===
 if __name__ == "__main__":
     asyncio.run(main())
+
