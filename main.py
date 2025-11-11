@@ -148,7 +148,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     closes = [float(c[2]) for c in candles]
     current, start = closes[-1], closes[0]
     growth = (current - start) / start * 100
-    emoji = "ЗЕЛЕНАЯ КРУЖОК" if growth > 0 else "КРАСНАЯ КРУЖОК" if growth < 0 else "БЕЛАЯ КРУЖОК"
+    emoji = "🟢" if growth > 0 else "🔴" if growth < 0 else "⚪"
     price_fmt = f"${current:.2f}" if current >= 10 else f"${current:.6f}"
     await update.message.reply_text(
         f"<b>{symbol}/USDT</b>\n"
@@ -202,3 +202,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         print("Бот остановлен вручную.")
+
