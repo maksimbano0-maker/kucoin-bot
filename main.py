@@ -161,15 +161,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def main():
     print("KuCoin Pro Bot запущен!")
     open(LOG_FILE, "a").close()
+
+    # Поддержка Render — запускаем веб-сервер для проверки "живости"
+    from aiohttp import web
+
+    async def health(request):
+        return web.Response(text="KuCoin bot is alive!")
+
+    port = int(os.getenv("PORT", 8080))
+    app_web = web.Application()
+    app_web.router.add_get("/", health)
+    runner = web.AppRunner(app_web)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {port}")
+
+    # Запуск планировщика в отдельном потоке
     threading.Thread(target=run_scheduler, daemon=True).start()
 
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Telegram bot
+    tg_app = Application.builder().token(TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     print("Готов! Проверки: 9:00 и 21:00")
-    await app.run_polling()
+
+    # Правильный запуск без нового event loop
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling()
+
+    # Держим процесс активным
+    await asyncio.Event().wait()
+
 
 # === ЗАПУСК ===
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Бот остановлен вручную.")
